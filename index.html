@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Haskay Pharmacy - Offline First</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    window.tailwind = window.tailwind || {};
+    window.tailwind.config = {
+        theme: {
+            extend: {
+                fontFamily: { sans: ['Inter', 'sans-serif'] },
+                colors: {
+                    primary: { 50: '#eff6ff', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' },
+                    emerald: { 500: '#10b981', 600: '#059669' }
+                }
+            }
+        }
+    }
+</script>
+<style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { font-family: 'Inter', sans-serif; }
+    .transition-all { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+    .card-hover:hover { transform: translateY(-2px); box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1); }
+    .animate-slide-in { animation: slideIn 0.3s ease-out; }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .glass { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(12px); }
+    input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2); }
+    .spinner { border: 3px solid rgba(0,0,0,0.1); border-left-color: #3b82f6; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 to-blue-50 min-h-screen">
+<div id="offline-banner" class="hidden bg-amber-500 text-white text-sm py-2 px-4 text-center font-medium">
+    <span id="banner-text">Local Mode: Running offline. Changes will sync when connection returns.</span>
+</div>
+
+<div id="app" class="min-h-screen flex flex-col"></div>
+
+<div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
+
+<script>
+// ==================== CONFIG ====================
+// config.js equivalent - In production these would be injected at build time
+window.APP_CONFIG = {
+    VITE_SUPABASE_URL: '', // Replace with your Supabase URL
+    VITE_SUPABASE_ANON_KEY: '' // Replace with your Supabase Anon Key
+};
+
+// ==================== SUPABASE LOADER WITH FALLBACK ====================
+class SupabaseManager {
+    constructor() {
+        this.client = null;
+        this.isOffline = !navigator.onLine;
+        this.isLocalMode = !window.APP_CONFIG.VITE_SUPABASE_URL || !window.APP_CONFIG.VITE_SUPABASE_ANON_KEY;
+        this.loadPromise = this.init();
+        this.syncQueue = JSON.parse(localStorage.getItem('haskay_sync_queue') || '[]');
+        window.addEventListener('online', () => this.handleOnline());
+        window.addEventListener('offline', () => this.handleOffline());
+    }
+
+    async init() {
+        if (this.isLocalMode) {
+            this.showBanner('Local Mode: Supabase not configured. All data stored locally.');
+            return;
+        }
+        try {
+            await this.loadSupabaseScript();
+            this.client = window.supabase.createClient(
+                window.APP_CONFIG.VITE_SUPABASE_URL,
+                window.APP_CONFIG.VITE_SUPABASE_ANON_KEY,
+                { auth: { persistSession: true, autoRefreshToken: true } }
+            );
+            this.handleOnline();
+        } catch (e) {
+            console.warn('Supabase CDN failed, falling back to Local Mode:', e);
+            this.isLocalMode = true;
+            this.showBanner('Local Mode: Could not connect to Supabase. Operating offline.');
+        }
+    }
+
+    loadSupabaseScript() {
+        return new Promise((resolve, reject) => {
+            if (window.supabase) return resolve();
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.44.4/dist/umd/supabase.min.js';
+            script.async = true;
+            script.onload = resolve;
+            script.onerror = () => reject(new Error('CDN load failed'));
+            setTimeout(() => reject(new Error('CDN timeout')), 5000);
+            document.head.appendChild(script);
+        });
+    }
+
+    showBanner(text) {
+        const banner = document.getElementById('offline-banner');
+        document.getElementById('banner-text').textContent = text;
+        banner.classList.remove('hidden');
+        setTimeout(() => banner.classList.add('animate-slide-in'), 10);
+    }
+
+    handleOnline() {
+        this.isOffline = false;
+        if (!this.isLocalMode && this.client) {
+            document.getElementById('offline-banner').classList.add('hidden');
+            this.processSyncQueue();
+        }
+    }
+
+    handleOffline() {
+        this.isOffline = true;
+        if (!this.isLocalMode) this.showBanner('You are offline. Changes queued for sync.');
+    }
+
+    queueOperation(table, operation, data) {
+        const item = { id: crypto.randomUUID(), table, operation, data, timestamp: Date.now() };
+        this.syncQueue.push(item);
+        localStorage.setItem('haskay_sync_queue', JSON.stringify(this.syncQueue));
+        return { data: { ...data, id: item.id, _queued: true }, error: null };
+    }
+
+    async processSyncQueue() {
+        if (this.isLocalMode || !this.client || this.syncQueue.length === 0) return;
+        const queue = [...this.syncQueue];
+        this.syncQueue = [];
+        localStorage.setItem('haskay_sync_queue', '[]');
+        
+        for (const item of queue) {
+            try {
+                if (item.operation === 'insert') {
+                    await this.client.from(item.table).insert(item.data);
+                } else if (item.operation === 'update') {
+                    await this.client.from(item.table).update(item.data).eq('id', item.data.id);
+                }
+                App.showToast(`Synced: ${item.table}`, 'success');
+            } catch (e) {
+                console.error('Sync failed for item:', item, e);
+                this.syncQueue.push(item); // Re-queue on failure
+            }
+        }
+        localStorage.setItem('haskay_sync_queue', JSON.stringify(this.syncQueue));
+    }
+
+    // Abstracted DB methods
+    async signIn(email, password) {
+        if (this.isLocalMode || this.isOffline) {
+            return this.localSignIn(email, password);
+        }
+        try {
+            const { data, error } = await this.client.auth.signInWithPassword({ email, password });
+            if (error) throw error;
+            const { data: staff } = await this.client.from('staff').select('*').eq('user_id', data.user.id).single();
+            return { user: { ...data.user, staff }, error: null };
+        } catch (error) {
+            return { user: null, error };
+        }
+    }
+
+    async getSession() {
+        if (this.isLocalMode || this.isOffline) {
+            const localSession = localStorage.getItem('haskay_local_session');
+            return localSession ? { data: { session: JSON.parse(localSession) }, error: null } : { data: { session: null }, error: null };
+        }
+        return await this.client.auth.getSession();
+    }
+
+    async signOut() {
+        localStorage.removeItem('haskay_local_session');
+        if (!this.isLocalMode && this.client) {
+            await this.client.auth.signOut();
+        }
+        return { error: null };
+    }
+
+    localSignIn(email, password) {
+        const users = JSON.parse(localStorage.getItem('haskay_local_users') || '[]');
+        const user = users.find(u => u.email === email && u.password === password);
+        if (!user) return { user: null, error: { message: 'Invalid credentials' } };
+        const session = { user, expires_at: Date.now() + 86400000 };
+        localStorage.setItem('haskay_local_session', JSON.stringify(session));
+        return { user, error: null };
+    }
+
+    async select(table, query = {}) {
+        if (this.isLocalMode || this.isOffline) {
+            const data = JSON.parse(localStorage.getItem(`haskay_${table}`) || '[]');
+            return { data, error: null };
+        }
+        let q = this.client.from(table).select(query.select || '*');
+        if (query.eq) q = q.eq(query.eq[0], query.eq[1]);
+        if (query.order) q = q.order(query.order[0], { ascending: query.order[1] === 'asc' });
+        if (query.single) q = q.single();
+        return await q;
+    }
+
+    async insert(table, data) {
+        if (this.isLocalMode || this.isOffline) {
+            const existing = JSON.parse(localStorage.getItem(`haskay_${table}`) || '[]');
+            const newItem = { ...data, id: crypto.randomUUID(), created_at: new Date().toISOString() };
+            existing.push(newItem);
+            localStorage.setItem(`haskay_${table}`, JSON.stringify(existing));
+            return this.isOffline && !this.isLocalMode ? this.queueOperation(table, 'insert', newItem) : { data: newItem, error: null };
+        }
+        return await this.client.from(table).insert(data).select();
+    }
+
+    async update(table, id, data) {
+        if (this.isLocalMode || this.isOffline) {
+            const existing = JSON.parse(localStorage.getItem(`haskay_${table}`) || '[]');
+            const idx = existing.findIndex(i => i.id === id);
+            if (idx > -1) existing[idx] = { ...existing[idx], ...data, updated_at: new Date().toISOString() };
+            localStorage.setItem(`haskay_${table}`, JSON.stringify(existing));
+            return this.isOffline && !this.isLocalMode ? this.queueOperation(table, 'update', existing[idx]) : { data: existing[idx], error: null };
+        }
+        return await this.client.from(table).update(data).eq('id', id).select();
+    }
+}
+
+const DB = new SupabaseManager();
+
+// ==================== APP LOGIC ====================
+const App = {
+    state: {
+        user: null,
+        route: '/',
+        loading: true,
+        currentFormTemplate: null
+    },
+
+    async init() {
+        await DB.loadPromise;
+        const { data } = await DB.getSession();
+        if (data.session) {
+            this.state.user = data.session.user;
+            await this.loadInitialData();
+        }
+        this.state.loading = false;
+        this.router();
+        window.addEventListener('hashchange', () => this.router());
+    },
+
+    async loadInitialData() {
+        const { data: template } = await DB.select('form_templates', { eq: ['active', true], single: true });
+        this.state.currentFormTemplate = template || this.getDefaultTemplate();
+    },
+
+    getDefaultTemplate() {
+        return {
+            id: 'local-default',
+            name: 'Default Patient Form',
+            fields_json: [
+                { name: 'full_name', label: 'Full Name', type: 'text', required: true },
+                { name: 'dob', label: 'Date of Birth', type: 'date', required: true },
+                { name: 'phone', label: 'Phone Number', type: 'tel', required: true },
+                { name: 'address', label: 'Address', type: 'textarea', required: false },
+                { name: 'notes', label: 'Clinical Notes', type: 'textarea', required: false }
+            ]
+        };
+    },
+
+    router() {
+        this.state.route = window.location.hash.slice(1) || '/';
+        if (!this.state.user && this.state.route !== '/login') {
+            window.location.hash = '/login';
+            return;
+        }
+        if (this.state.user && this.state.route === '/login') {
+            window.location.hash = '/dashboard';
+            return;
+        }
+        this.render();
+    },
+
+    render() {
+        const app = document.getElementById('app');
+        if (this.state.loading) {
+            app.innerHTML = this.loadingScreen();
+            return;
+        }
+        if (!this.state.user) {
+            app.innerHTML = this.loginPage();
+            this.attachLoginHandlers();
+            return;
+        }
+        app.innerHTML = `
+            <div class="flex min-h-screen">
+                ${this.sidebar()}
+                <main class="flex-1 overflow-x-hidden">
+                    <div class="p-4 md:p-8 max-w-7xl mx-auto animate-slide-in">
+                        ${this.getPageContent()}
+                    </div>
+                </main>
+            </div>
+        `;
+        this.attachPageHandlers();
+    },
+
+    getPageContent() {
+        const pages = {
+            '/dashboard': this.dashboardPage(),
+            '/patients': this.patientsPage(),
+            '/patients/new': this.patientFormPage(),
+            '/expenses': this.expensesPage(),
+            '/expenses/new': this.expenseFormPage(),
+            '/attendance': this.attendancePage(),
+            '/admin': this.adminPage(),
+            '/admin/form-builder': this.formBuilderPage()
+        };
+        return pages[this.state.route] || this.dashboardPage();
+    },
+
+    sidebar() {
+        const isAdmin = this.state.user?.staff?.role === 'admin' || this.state.user?.role === 'admin';
+        const navItems = [
+            { route: '/dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
+            { route: '/patients', label: 'Patients', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
+            { route: '/expenses', label: 'Expenses', icon: 'M12 8c-1.657 0-3 .895-3 2s1.343 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
+            { route: '/attendance', label: 'Attendance', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' }
+        ];
+        if (isAdmin) navItems.push({ route: '/admin', label: 'Admin', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' });
+
+        return `
+            <aside class="hidden md:flex md:flex-col w-64 bg-white border-r border-slate-200 shadow-sm">
+                <div class="p-6 border-b border-slate-200">
+                    <h1 class="text-2xl font-bold bg-gradient-to-r from-primary-600 to-emerald-600 bg-clip-text text-transparent">Haskay Pharmacy</h1>
+                    <p class="text-xs text-slate-500 mt-1">${this.state.user.email}</p>
+                </div>
+                <nav class="flex-1 p-4 space-y-1">
+                    ${navItems.map(item => `
+                        <a href="#${item.route}" class="flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${this.state.route.startsWith(item.route) ? 'bg-primary-50 text-primary-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${item.icon}"></path></svg>
+                            ${item.label}
+                        </a>
+                    `).join('')}
+                </nav>
+                <div class="p-4 border-t border-slate-200">
+                    <button id="logout-btn" class="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-600 hover:bg-slate-50 transition-all">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                        Sign Out
+                    </button>
+                </div>
+            </aside>
+            ${this.mobileNav(navItems)}
+        `;
+    },
+
+    mobileNav(navItems) {
+        return `
+            <nav class="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-40 glass">
+                <div class="flex justify-around py-2">
+                    ${navItems.slice(0, 4).map(item => `
+                        <a href="#${item.route}" class="flex flex-col items-center gap-1 px-3 py-2 rounded-lg ${this.state.route.startsWith(item.route) ? 'text-primary-600' : 'text-slate-500'}">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${item.icon}"></path></svg>
+                            <span class="text-xs">${item.label}</span>
+                        </a>
+                    `).join('')}
+                </div>
+            </nav>
+        `;
+    },
+
+    loadingScreen() {
+        return `
+            <div class="min-h-screen flex items-center justify-center">
+                <div class="text-center">
+                    <div class="spinner mx-auto mb-4"></div>
+                    <p class="text-slate-600">Loading Haskay Pharmacy...</p>
+                </div>
+            </div>
+        `;
+    },
+
+    loginPage() {
+        return `
+            <div class="min-h-screen flex items-center justify-center p-4">
+                <div class="w-full max-w-md">
+                    <div class="bg-white rounded-2xl shadow-xl p-8 animate-slide-in">
+                        <div class="text-center mb-8">
+                            <h1 class="text-3xl font-bold bg-gradient-to-r from-primary-600 to-emerald-600 bg-clip-text text-transparent mb-2">Haskay Pharmacy</h1>
+                            <p class="text-slate-600">Staff Portal - No self sign-up</p>
+                        </div>
+                        <form id="login-form" class="space-y-5">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-2">Email</label>
+                                <input type="email" id="email" required class="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-primary-500 transition-all" placeholder="staff@haskay.com">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-2">Password</label>
+                                <input type="password" id="password" required class="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-primary-500 transition-all" placeholder="••••••••">
+                            </div>
+                            <button type="submit" class="w-full bg-gradient-to-r from-primary-600 to-emerald-600 text-white font-semibold py-3 rounded-lg shadow-lg hover:shadow-xl transition-all card-hover">
+                                Sign In
+                            </button>
+                        </form>
+                        <p class="text-xs text-center text-slate-500 mt-6">Contact admin to create staff account</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    },
+
+    dashboardPage() {
+        return `
+            <div class="space-y-6 pb-20 md:pb-0">
+                <div>
+                    <h2 class="text-3xl font-bold text-slate-900 mb-2">Welcome back</h2>
+                    <p class="text-slate-600">${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    ${this.statCard('Patients Today', '12', 'emerald', 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z')}
+                    ${this.statCard('Expenses MTD', '$1,240', 'blue', 'M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z')}
+                    ${this.statCard('On Time', '94%', 'green', 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z')}
+                    ${this.statCard('Pending Sync', DB.syncQueue.length, 'amber', 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15')}
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                        <h3 class="text-lg font-semibold text-slate-900 mb-4">Quick Actions</h3>
+                        <div class="space-y-3">
+                            ${this.quickAction('#/patients/new', 'New Patient Record', 'emerald')}
+                            ${this.quickAction('#/expenses/new', 'Log Expense', 'blue')}
+                            ${this.quickAction('#/attendance', 'Check In/Out', 'purple')}
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                        <h3 class="text-lg font-semibold text-slate-900 mb-4">Recent Activity</h3>
+                        <div class="space-y-3 text-sm text-slate-600">
+                            <p>• Patient John D. - 10 mins ago</p>
+                            <p>• Expense: Office Supplies $45 - 1h ago</p>
+                            <p>• Check-in: Sarah M. - 8:02 AM</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    },
+
+    statCard(title, value, color, icon) {
+        const colors = { emerald: 'emerald', blue: 'primary', green: 'green', amber: 'amber' };
+        return `
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 card-hover transition-all">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-medium text-slate-600">${title}</span>
+                    <div class="p-2 bg-${colors[color]}-50 rounded-lg">
+                        <svg class="w-5 h-5 text-${colors[color]}-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${icon}"></path></svg>
+                    </div>
+                </div>
+                <p class="text-3xl font-bold text-slate-900">${value}</p>
+            </div>
+        `;
+    },
+
+    quickAction(href, label, color) {
+        return `
+            <a href="${href}" class="flex items-center justify-between p-4 rounded-lg border border-slate-200 hover:border-${color}-300 hover:bg-${color}-50 transition-all group">
+                <span class="font-medium text-slate-700 group-hover:text-${color}-700">${label}</span>
+                <svg class="w-5 h-5 text-slate-400 group-hover:text-${color}-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+            </a>
+        `;
+    },
+
+    patientsPage() {
+        return `
+            <div class="space-y-6 pb-20 md:pb-0">
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <h2 class="text-3xl font-bold text-slate-900">Patients</h2>
+                    <a href="#/patients/new" class="inline-flex items-center gap-2 bg-gradient-to-r from-primary-600 to-emerald-600 text-white font-semibold px-5 py-3 rounded-lg shadow-lg hover:shadow-xl transition-all card-hover">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                        New Patient
+                    </a>
+                </div>
+                <div id="patients-list" class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="p-6 text-center text-slate-500">Loading patients...</div>
+                </div>
+            </div>
+        `;
+    },
+
+    patientFormPage() {
+        const fields = this.state.currentFormTemplate.fields_json;
+        return `
+            <div class="max-w-3xl mx-auto space-y-6 pb-20 md:pb-0">
+                <div class="flex items-center gap-4">
+                    <a href="#/patients" class="p-2 hover:bg-slate-100 rounded-lg transition-all">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                    </a>
+                    <h2 class="text-3xl font-bold text-slate-900">${this.state.currentFormTemplate.name}</h2>
+                </div>
+                <form id="patient-form" class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8 space-y-6">
+                    ${fields.map(f => this.renderFormField(f)).join('')}
+                    <div class="flex gap-3 pt-4">
+                        <button type="submit" class="flex-1 bg-gradient-to-r from-primary-600 to-emerald-600 text-white font-semibold py-3 rounded-lg shadow-lg hover:shadow-xl transition-all card-hover">
+                            Save Patient Record
+                        </button>
+                        <a href="#/patients" class="px-6 py-3 border border-slate-300 rounded-lg font-medium text-slate-700 hover:bg-slate-50 transition-all">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        `;
+    },
+
+    renderFormField(field) {
+        const baseClasses = "w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-primary-500 transition-all";
+        const required = field.required ? 'required' : '';
+        const requiredMark = field.required ? '<span class="text-red-500">*</span>' : '';
+        
+        let input = '';
+        if (field.type === 'textarea') {
+            input = `<textarea name="${field.name}" ${required} rows="4" class="${baseClasses}" placeholder="${field.placeholder || ''}"></textarea>`;
+        } else if (field.type === 'select') {
+            input = `<select name="${field.name}" ${required} class="${baseClasses}">
+                <option value="">Select ${field.label}</option>
+                ${(field.options || []).map(o => `<option value="${o}">${o}</option>`).join('')}
+            </select>`;
+        } else {
+            input = `<input type="${field.type}" name="${field.name}" ${required} class="${baseClasses}" placeholder="${field.placeholder || ''}">`;
+        }
+        
+        return `
+            <div>
+                <label class="block text-sm font-medium text-slate-700 mb-2">${field.label} ${requiredMark}</label>
+                ${input}
+            </div>
+        `;
+    },
+
+    expensesPage() {
+        return `
+            <div class="space-y-6 pb-20 md:pb-0">
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <h2 class="text-3xl font-bold text-slate-900">Expenses</h2>
+                    <a href="#/expenses/new" class="inline-flex items-center gap-2 bg-gradient-to-r from-primary-600 to-emerald-600 text-white font-semibold px-5 py-3 rounded-lg shadow-lg hover:shadow-xl transition-all card-hover">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                        Log Expense
+                    </a>
+                </div>
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+                    <strong>Note:</strong> Log only overhead expenses. No expense presets per requirements.
+                </div>
+                <div id="expenses-list" class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="p-6 text-center text-slate-500">Loading expenses...</div>
+                </div>
+            </div>
+        `;
+    },
+
+    expenseFormPage() {
+        return `
+            <div class="max-w-2xl mx-auto space-y-6 pb-20 md:pb-0">
+                <div class="flex items-center gap-4">
+                    <a href="#/expenses" class="p-2 hover:bg-slate-100 rounded-lg transition-all">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                    </a>
+                    <h2 class="text-3xl font-bold text-slate-900">Log Expense</h2>
+                </div>
+                <form id="expense-form" class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8 space-y-6">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-2">Category <span class="text-red-500">*</span></label>
+                        <input type="text" name="category" required class="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-primary-500 transition-all" placeholder="e.g., Office Supplies, Utilities">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-2">Amount <span class="text-red-500">*</span></label>
+                        <input type="number" name="amount" step="0.01" required class="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-primary-500 transition-all" placeholder="0.00">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-2">Description</label>
+                        <textarea name="description" rows="3" class="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-primary-500 transition-all" placeholder="Optional details"></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-2">Receipt Upload</label>
+                        <input type="file" name="receipt" accept="image/*,.pdf" class="w-full px-4 py-3 rounded-lg border border-slate-300 focus:border-primary-500 transition-all">
+                    </div>
+                    <div class="flex gap-3 pt-4">
+                        <button type="submit" class="flex-1 bg-gradient-to-r from-primary-600 to-emerald-600 text-white font-semibold py-3 rounded-lg shadow-lg hover:shadow-xl transition-all card-hover">
+                            Save Expense
+                        </button>
+                        <a href="#/expenses" class="px-6 py-3 border border-slate-300 rounded-lg font-medium text-slate-700 hover:bg-slate-50 transition-all">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        `;
+    },
+
+    attendancePage() {
+        return `
+            <div class="space-y-6 pb-20 md:pb-0">
+                <h2 class="text-3xl font-bold text-slate-900">Attendance</h2>
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8">
+                    <div class="text-center py-12">
+                        <div class="inline-flex items-center justify-center w-20 h-20 bg-primary-100 rounded-full mb-4">
+                            <svg class="w-10 h-10 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        </div>
+                        <p class="text-2xl font-bold text-slate-900 mb-2" id="current-time">--:--</p>
+                        <p class="text-slate-600 mb-6">Scheduled: 09:00 AM</p>
+                        <button id="checkin-btn" class="bg-gradient-to-r from-primary-600 to-emerald-600 text-white font-semibold px-8 py-3 rounded-lg shadow-lg hover:shadow-xl transition-all card-hover">
+                            Check In
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    },
+
+    adminPage() {
+        return `
+            <div class="space-y-6 pb-20 md:pb-0">
+                <h2 class="text-3xl font-bold text-slate-900">Admin Panel</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <a href="#/admin/form-builder" class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 card-hover transition-all">
+                        <div class="flex items-center gap-4 mb-3">
+                            <div class="p-3 bg-primary-50 rounded-lg">
+                                <svg class="w-6 h-6 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                            </div>
+                            <h3 class="text-lg font-semibold text-slate-900">Form Builder</h3>
+                        </div>
+                        <p class="text-sm text-slate-600">Customize patient form fields to match hardcopy</p>
+                    </a>
+                    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                        <div class="flex items-center gap-4 mb-3">
+                            <div class="p-3 bg-emerald-50 rounded-lg">
+                                <svg class="w-6 h-6 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"></path></svg>
+                            </div>
+                            <h3 class="text-lg font-semibold text-slate-900">Staff Management</h3>
+                        </div>
+                        <p class="text-sm text-slate-600 mb-4">Create staff via Vercel API with x-admin-key</p>
+                        <button id="create-staff-demo" class="text-sm text-primary-600 font-medium hover:underline">View API Docs →</button>
+                    </div>
+                </div>
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+                    <strong>Backend Setup Required:</strong> Deploy /api folder to Vercel with SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and ADMIN_API_KEY environment variables.
+                </div>
+            </div>
+        `;
+    },
+
+    formBuilderPage() {
+        const template = this.state.currentFormTemplate;
+        return `
+            <div class="space-y-6 pb-20 md:pb-0">
+                <div class="flex items-center gap-4">
+                    <a href="#/admin" class="p-2 hover:bg-slate-100 rounded-lg transition-all">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                    </a>
+                    <div>
+                        <h2 class="text-3xl font-bold text-slate-900">Patient Form Builder</h2>
+                        <p class="text-slate-600">Fully customizable to match hardcopy</p>
+                    </div>
+                </div>
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8">
+                    <div id="form-fields-list" class="space-y-4 mb-6">
+                        ${template.fields_json.map((f, i) => this.formFieldEditor(f, i)).join('')}
+                    </div>
+                    <div class="flex gap-3">
+                        <button id="add-field-btn" class="px-5 py-2 border border-slate-300 rounded-lg font-medium text-slate-700 hover:bg-slate-50 transition-all">
+                            + Add Field
+                        </button>
+                        <button id="save-template-btn" class="flex-1 bg-gradient-to-r from-primary-600 to-emerald-600 text-white font-semibold py-3 rounded-lg shadow-lg hover:shadow-xl transition-all card-hover">
+                            Save Template
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    },
+
+    formFieldEditor(field, index) {
+        return `
+            <div class="border border-slate-200 rounded-lg p-4 space-y-3" data-index="${index}">
+                <div class="flex justify-between items-start gap-4">
+                    <div class="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <input type="text" value="${field.label}" class="field-label px-3 py-2 rounded border border-slate-300" placeholder="Field Label">
+                        <input type="text" value="${field.name}" class="field-name px-3 py-2 rounded border border-slate-300" placeholder="field_name">
+                        <select class="field-type px-3 py-2 rounded border border-slate-300">
+                            <option value="text" ${field.type === 'text' ? 'selected' : ''}>Text</option>
+                            <option value="number" ${field.type === 'number' ? 'selected' : ''}>Number</option>
+                            <option value="date" ${field.type === 'date' ? 'selected' : ''}>Date</option>
+                            <option value="tel" ${field.type === 'tel' ? 'selected' : ''}>Phone</option>
+                            <option value="email" ${field.type === 'email' ? 'selected' : ''}>Email</option>
+                            <option value="textarea" ${field.type === 'textarea' ? 'selected' : ''}>Textarea</option>
+                            <option value="select" ${field.type === 'select' ? 'selected' : ''}>Dropdown</option>
+                        </select>
+                        <label class="flex items-center gap-2 px-3 py-2">
+                            <input type="checkbox" class="field-required" ${field.required ? 'checked' : ''}>
+                            <span class="text-sm text-slate-600">Required</span>
+                        </label>
+                    </div>
+                    <button class="remove-field-btn p-2 text-red-600 hover:bg-red-50 rounded transition-all">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    </button>
+                </div>
+                ${field.type === 'select' ? `
+                    <input type="text" value="${(field.options || []).join(', ')}" class="field-options w-full px-3 py-2 rounded border border-slate-300" placeholder="Option 1, Option 2, Option 3">
+                ` : ''}
+            </div>
+        `;
+    },
+
+    attachLoginHandlers() {
+        document.getElementById('login-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const btn = e.target.querySelector('button');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner mx-auto"></div>';
+            
+            const { user, error } = await DB.signIn(email, password);
+            if (error) {
+                this.showToast(error.message, 'error');
+                btn.disabled = false;
+                btn.textContent = 'Sign In';
+            } else {
+                this.state.user = user;
+                this.showToast('Welcome back!', 'success');
+                window.location.hash = '/dashboard';
+            }
+        });
+    },
+
+    attachPageHandlers() {
+        document.getElementById('logout-btn')?.addEventListener('click', async () => {
+            await DB.signOut();
+            this.state.user = null;
+            window.location.hash = '/login';
+            this.showToast('Signed out', 'info');
+        });
+
+        document.getElementById('patient-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const data_json = Object.fromEntries(formData);
+            await DB.insert('patients', { data_json, created_by: this.state.user.id });
+            this.showToast('Patient record saved', 'success');
+            window.location.hash = '/patients';
+        });
+
+        document.getElementById('expense-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const data = Object.fromEntries(formData);
+            await DB.insert('expenses', { ...data, logged_by: this.state.user.id });
+            this.showToast('Expense logged', 'success');
+            window.location.hash = '/expenses';
+        });
+
+        document.getElementById('checkin-btn')?.addEventListener('click', async () => {
+            this.showToast('Checked in at ' + new Date().toLocaleTimeString(), 'success');
+            document.getElementById('checkin-btn').textContent = 'Check Out';
+        });
+
+        document.getElementById('create-staff-demo')?.addEventListener('click', () => {
+            this.showToast('POST /api/admin/create-staff with x-admin-key header', 'info');
+        });
+
+        // Form Builder handlers
+        document.getElementById('add-field-btn')?.addEventListener('click', () => {
+            const list = document.getElementById('form-fields-list');
+            const newField = { name: 'new_field', label: 'New Field', type: 'text', required: false };
+            list.insertAdjacentHTML('beforeend', this.formFieldEditor(newField, list.children.length));
+            this.attachFieldEditorHandlers();
+        });
+
+        document.getElementById('save-template-btn')?.addEventListener('click', async () => {
+            const fields = [];
+            document.querySelectorAll('[data-index]').forEach(el => {
+                const field = {
+                    name: el.querySelector('.field-name').value,
+                    label: el.querySelector('.field-label').value,
+                    type: el.querySelector('.field-type').value,
+                    required: el.querySelector('.field-required').checked
+                };
+                if (field.type === 'select') {
+                    field.options = el.querySelector('.field-options')?.value.split(',').map(s => s.trim()) || [];
+                }
+                fields.push(field);
+            });
+            this.state.currentFormTemplate.fields_json = fields;
+            await DB.update('form_templates', this.state.currentFormTemplate.id, { fields_json: fields });
+            this.showToast('Form template saved', 'success');
+        });
+
+        this.attachFieldEditorHandlers();
+        this.updateCurrentTime();
+
+        // Load lists
+        if (this.state.route === '/patients') this.loadPatients();
+        if (this.state.route === '/expenses') this.loadExpenses();
+    },
+
+    attachFieldEditorHandlers() {
+        document.querySelectorAll('.remove-field-btn').forEach(btn => {
+            btn.onclick = (e) => e.target.closest('[data-index]').remove();
+        });
+    },
+
+    async loadPatients() {
+        const { data } = await DB.select('patients', { order: ['created_at', 'desc'] });
+        const list = document.getElementById('patients-list');
+        if (!data || data.length === 0) {
+            list.innerHTML = '<div class="p-6 text-center text-slate-500">No patients yet. Add your first record.</div>';
+            return;
+        }
+        list.innerHTML = `
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead class="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Name</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Phone</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Date Added</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-200">
+                        ${data.map(p => `
+                            <tr class="hover:bg-slate-50 transition-all">
+                                <td class="px-6 py-4 text-sm font-medium text-slate-900">${p.data_json.full_name || 'N/A'}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${p.data_json.phone || 'N/A'}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${new Date(p.created_at).toLocaleDateString()}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    },
+
+    async loadExpenses() {
+        const { data } = await DB.select('expenses', { order: ['created_at', 'desc'] });
+        const list = document.getElementById('expenses-list');
+        if (!data || data.length === 0) {
+            list.innerHTML = '<div class="p-6 text-center text-slate-500">No expenses logged yet.</div>';
+            return;
+        }
+        const total = data.reduce((sum, e) => sum + parseFloat(e.amount), 0);
+        list.innerHTML = `
+            <div class="p-6 border-b border-slate-200">
+                <p class="text-sm text-slate-600">Total: <span class="text-2xl font-bold text-slate-900">$${total.toFixed(2)}</span></p>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead class="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Date</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Category</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Amount</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-slate-700 uppercase">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-200">
+                        ${data.map(e => `
+                            <tr class="hover:bg-slate-50 transition-all">
+                                <td class="px-6 py-4 text-sm text-slate-600">${new Date(e.date).toLocaleDateString()}</td>
+                                <td class="px-6 py-4 text-sm font-medium text-slate-900">${e.category}</td>
+                                <td class="px-6 py-4 text-sm font-semibold text-slate-900">$${parseFloat(e.amount).toFixed(2)}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${e.description || '-'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    },
+
+    updateCurrentTime() {
+        const el = document.getElementById('current-time');
+        if (el) {
+            const update = () => el.textContent = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+            update();
+            setInterval(update, 1000);
+        }
+    },
+
+    showToast(message, type = 'info') {
+        const colors = {
+            success: 'bg-emerald-600',
+            error: 'bg-red-600',
+            info: 'bg-primary-600',
+            warning: 'bg-amber-600'
+        };
+        const toast = document.createElement('div');
+        toast.className = `${colors[type]} text-white px-6 py-3 rounded-lg shadow-lg animate-slide-in`;
+        toast.textContent = message;
+        document.getElementById('toast-container').appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+    }
+};
+
+// ==================== INIT ====================
+// Create default local users for Local Mode demo
+if (!localStorage.getItem('haskay_local_users')) {
+    localStorage.setItem('haskay_local_users', JSON.stringify([
+        { id: '1', email: 'admin@haskay.com', password: 'admin123', staff: { role: 'admin', full_name: 'Admin User' } },
+        { id: '2', email: 'staff@haskay.com', password: 'staff123', staff: { role: 'staff', full_name: 'Staff User' } }
+    ]));
+}
+
+App.init();
+</script>
+
+<!--
+DEPLOYMENT README:
+=======================================
+
+1. SUPABASE SETUP:
+   - Create project at supabase.com
+   - SQL Editor > paste the schema from prompt
+   - Storage > Create bucket 'receipts' (private)
+   - Auth > Users > Invite user > Note the user_id
+   - SQL > update public.staff set role='admin' where user_id='<uuid>';
+
+2. VERCEL BACKEND /api folder:
+   
+   /api/admin/create-staff.js:
+   ```js
+   import { createClient } from '@supabase/supabase-js';
+   
+   export default async function handler(req, res) {
+     if (req.headers['x-admin-key'] !== process.env.ADMIN_API_KEY) {
+       return res.status(401).json({ error: 'Unauthorized' });
+     }
+     const { email, password, full_name, role, scheduled_start_time } = req.body;
+     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+     const { data: auth, error: authErr } = await supabase.auth.admin.createUser({ email, password, email_confirm: true });
+     if (authErr) return res.status(400).json({ error: authErr.message });
+     const { data, error } = await supabase.from('staff').insert({
+       user_id: auth.user.id, full_name, role, scheduled_start_time
+     }).select();
+     if (error) return res.status(400).json({ error: error.message });
+     res.json({ data });
+   }
+/api/admin/reset-password.js:
+
+import { createClient } from '@supabase/supabase-js';
+
+export default async function handler(req, res) {
+  if (req.headers['x-admin-key'] !== process.env.ADMIN_API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const { user_id, new_password } = req.body;
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+  const { error } = await supabase.auth.admin.updateUserById(user_id, { password: new_password });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ success: true });
+}
