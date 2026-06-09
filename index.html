@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2.44.4/dist/umd/supabase.min.js"></script>
 <script>
     window.tailwind = window.tailwind || {};
     window.tailwind.config = {
@@ -52,22 +53,19 @@ class SupabaseManager {
         this.client = null;
         this.isOffline = !navigator.onLine;
         this.isLocalMode = !window.APP_CONFIG.VITE_SUPABASE_URL || !window.APP_CONFIG.VITE_SUPABASE_ANON_KEY;
-        this.loadPromise = this.init();
+        this.loadPromise = this.init(); // supabase preloaded in <head>
         this.syncQueue = JSON.parse(localStorage.getItem('haskay_sync_queue') || '[]');
         window.addEventListener('online', () => this.handleOnline());
         window.addEventListener('offline', () => this.handleOffline());
     }
 
     async init() {
-        // Show loading screen immediately
-        document.getElementById("app").innerHTML = this.loadingScreen();
-        window.addEventListener("hashchange", () => this.router());
         if (this.isLocalMode) {
             this.showBanner('Local Mode: Supabase not configured. All data stored locally.');
             return;
         }
         try {
-            await this.loadSupabaseScript();
+            if (!window.supabase) throw new Error('Supabase not loaded');
             this.client = window.supabase.createClient(
                 window.APP_CONFIG.VITE_SUPABASE_URL,
                 window.APP_CONFIG.VITE_SUPABASE_ANON_KEY,
@@ -75,7 +73,7 @@ class SupabaseManager {
             );
             this.handleOnline();
         } catch (e) {
-            console.warn('Supabase CDN failed, falling back to Local Mode:', e);
+            console.warn('Supabase init failed:', e);
             this.isLocalMode = true;
             this.showBanner('Local Mode: Could not connect to Supabase. Operating offline.');
         }
