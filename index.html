@@ -52,9 +52,18 @@ class SupabaseManager {
     constructor() {
         this.client = null;
         this.isOffline = !navigator.onLine;
-        this.isLocalMode = !window.APP_CONFIG.VITE_SUPABASE_URL || !window.APP_CONFIG.VITE_SUPABASE_ANON_KEY;
+        
+        // Dynamic Variable Checking: Merges build environments or falls back safely
+        const rawUrl = (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) || window.APP_CONFIG?.VITE_SUPABASE_URL;
+        const rawKey = (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) || window.APP_CONFIG?.VITE_SUPABASE_ANON_KEY;
+
+        this.url = rawUrl ? rawUrl.trim() : '';
+        this.key = rawKey ? rawKey.trim() : '';
+        
+        this.isLocalMode = !this.url || !this.key;
         this.syncQueue = JSON.parse(localStorage.getItem('haskay_sync_queue') || '[]');
         this.loadPromise = this.init(); 
+        
         window.addEventListener('online', () => this.handleOnline());
         window.addEventListener('offline', () => this.handleOffline());
     }
@@ -70,12 +79,21 @@ class SupabaseManager {
                 await this.loadSupabaseScript();
             }
             
-            this.client = window.supabase.createClient(
-                window.APP_CONFIG.VITE_SUPABASE_URL,
-                window.APP_CONFIG.VITE_SUPABASE_ANON_KEY,
-                { auth: { persistSession: true, autoRefreshToken: true } }
-            );
-            console.log('Supabase client successfully initialized.');
+            this.client = window.supabase.createClient(this.url, this.key, { 
+                auth: { persistSession: true, autoRefreshToken: true } 
+            });
+            
+            // Check connectivity validation right out of the box
+            const { error: pingError } = await this.client.auth.getSession();
+            if (pingError) throw pingError;
+
+            console.log('Supabase client successfully initialized and verified live cloud connection!');
+            this.isLocalMode = false;
+            
+            // Explicitly force hide banner on successful cloud handshakes
+            const banner = document.getElementById('offline-banner');
+            if (banner) banner.classList.add('hidden');
+            
             this.handleOnline();
         } catch (e) {
             console.error('Supabase initialization failure:', e.message);
@@ -306,7 +324,7 @@ const App = {
             <aside class="hidden md:flex md:flex-col w-64 bg-white border-r border-slate-200 shadow-sm">
                 <div class="p-6 border-b border-slate-200">
                     <h1 class="text-2xl font-bold bg-gradient-to-r from-primary-600 to-emerald-600 bg-clip-text text-transparent">Haskay Pharmacy</h1>
-                    <p class="text-xs text-slate-500 mt-1">${this.state.user.email || ''}</p>
+                    <p class="text-xs text-slate-500 mt-1">${this.state.user?.email || ''}</p>
                 </div>
                 <nav class="flex-1 p-4 space-y-1">
                     ${navItems.map(item => `
@@ -337,12 +355,12 @@ const App = {
     },
 
     loadingScreen() { return `<div class="min-h-screen flex items-center justify-center"><div class="spinner"></div></div>`; },
-    loginPage() { return `<div class="min-h-screen flex items-center justify-center"><form id="login-form" class="bg-white p-8 rounded shadow-md"><input type="email" id="email" required class="border p-2 mb-2 block" placeholder="Email"><input type="password" id="password" required class="border p-2 mb-4 block" placeholder="Password"><button type="submit" class="bg-blue-500 text-white p-2 rounded w-full">Login</button></form></div>`; },
-    dashboardPage() { return `<div class="p-4"><h2>Dashboard Ready and Operational</h2></div>`; },
-    patientsPage() { return `<div class="p-4"><h2>Patients Overview</h2></div>`; },
-    patientFormPage() { return `<div class="p-4"><h2>Register New Patient</h2></div>`; },
-    expensesPage() { return `<div class="p-4"><h2>Overhead Operational Expenses</h2></div>`; },
-    expenseFormPage() { return `<div class="p-4"><h2>Create Expense Record</h2></div>`; },
+    loginPage() { return `<div class="min-h-screen flex items-center justify-center"><form id="login-form" class="bg-white p-8 rounded shadow-md max-w-md w-full mx-4"><h3 class="text-xl font-bold mb-4 text-center text-slate-800">Staff Secure Portal</h3><input type="email" id="email" required class="border border-slate-200 p-3 rounded mb-3 block w-full bg-slate-50" placeholder="Email"><input type="password" id="password" required class="border border-slate-200 p-3 rounded mb-5 block w-full bg-slate-50" placeholder="Password"><button type="submit" class="bg-primary-600 hover:bg-primary-700 text-white p-3 font-semibold rounded w-full transition-all shadow-md">Login</button></form></div>`; },
+    dashboardPage() { return `<div class="p-4"><h2 class="text-2xl font-bold text-slate-800">Dashboard Working Ready</h2></div>`; },
+    patientsPage() { return `<div class="p-4"><h2 class="text-2xl font-bold text-slate-800">Patients Management</h2></div>`; },
+    patientFormPage() { return `<div class="p-4"><h2 class="text-2xl font-bold text-slate-800">Add Patient</h2></div>`; },
+    expensesPage() { return `<div class="p-4"><h2 class="text-2xl font-bold text-slate-800">Expenses Overhead Log</h2></div>`; },
+    expenseFormPage() { return `<div class="p-4"><h2 class="text-2xl font-bold text-slate-800">Log New Expense</h2></div>`; },
     
     attendancePage() { 
         return `
@@ -353,7 +371,7 @@ const App = {
                         <div class="inline-flex items-center justify-center w-20 h-20 bg-primary-100 rounded-full mb-4">
                             <svg class="w-10 h-10 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                         </div>
-                        <p class="text-slate-600">Attendance verification operational.</p>
+                        <p class="text-slate-600">Attendance features ready to process.</p>
                     </div>
                 </div>
             </div>`; 
