@@ -65,15 +65,19 @@ class SupabaseManager {
             return;
         }
         try {
-            if (!window.supabase) throw new Error('Supabase not loaded');
+            console.log('Supabase window object:', typeof window.supabase);
+            console.log('URL:', window.APP_CONFIG.VITE_SUPABASE_URL);
+            console.log('Key length:', window.APP_CONFIG.VITE_SUPABASE_ANON_KEY?.length);
+            if (!window.supabase) throw new Error('Supabase JS not loaded');
             this.client = window.supabase.createClient(
                 window.APP_CONFIG.VITE_SUPABASE_URL,
                 window.APP_CONFIG.VITE_SUPABASE_ANON_KEY,
                 { auth: { persistSession: true, autoRefreshToken: true } }
             );
+            console.log('Supabase client created successfully');
             this.handleOnline();
         } catch (e) {
-            console.warn('Supabase init failed:', e);
+            console.error('Supabase init failed:', e.message);
             this.isLocalMode = true;
             this.showBanner('Local Mode: Could not connect to Supabase. Operating offline.');
         }
@@ -219,19 +223,18 @@ const App = {
 
     async init() {
         this.state.loading = true;
-        document.getElementById("app").innerHTML = this.loadingScreen();
         window.addEventListener('hashchange', () => this.router());
+        // Render login immediately, don't wait
+        this.state.loading = false;
+        // Try to restore session in background
         try {
-            await Promise.race([DB.loadPromise, new Promise(r => setTimeout(r, 8000))]);
-        } catch(e) { console.warn('DB init timeout:', e); }
-        try {
+            await Promise.race([DB.loadPromise, new Promise(r => setTimeout(r, 3000))]);
             const { data } = await DB.getSession();
             if (data && data.session) {
                 this.state.user = data.session.user;
                 await this.loadInitialData();
             }
         } catch(e) { console.warn('Session check failed:', e); }
-        this.state.loading = false;
         this.router();
     },
 
