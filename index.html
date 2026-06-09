@@ -140,7 +140,7 @@ class SupabaseManager {
     }
 
     async signIn(email, password) {
-        if (this.isLocalMode || this.isOffline) return this.localSignIn(email, password);
+        if (this.isLocalMode || this.isOffline || !this.client) return this.localSignIn(email, password);
         try {
             const { data, error } = await this.client.auth.signInWithPassword({ email, password });
             if (error) throw error;
@@ -152,11 +152,16 @@ class SupabaseManager {
     }
 
     async getSession() {
-        if (this.isLocalMode || this.isOffline) {
+        if (this.isLocalMode || this.isOffline || !this.client) {
             const localSession = localStorage.getItem('haskay_local_session');
             return localSession ? { data: { session: JSON.parse(localSession) }, error: null } : { data: { session: null }, error: null };
         }
-        return await this.client.auth.getSession();
+        try {
+            return await this.client.auth.getSession();
+        } catch(e) {
+            console.warn('getSession failed:', e);
+            return { data: { session: null }, error: e };
+        }
     }
 
     async signOut() {
