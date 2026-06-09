@@ -59,6 +59,9 @@ class SupabaseManager {
     }
 
     async init() {
+        // Show loading screen immediately
+        document.getElementById("app").innerHTML = this.loadingScreen();
+        window.addEventListener("hashchange", () => this.router());
         if (this.isLocalMode) {
             this.showBanner('Local Mode: Supabase not configured. All data stored locally.');
             return;
@@ -86,7 +89,7 @@ class SupabaseManager {
             script.async = true;
             script.onload = resolve;
             script.onerror = () => reject(new Error('CDN load failed'));
-            setTimeout(() => reject(new Error('CDN timeout')), 5000);
+            setTimeout(() => reject(new Error("CDN timeout")), 10000);
             document.head.appendChild(script);
         });
     }
@@ -212,15 +215,21 @@ const App = {
     state: { user: null, route: '/', loading: true, currentFormTemplate: null },
 
     async init() {
-        await DB.loadPromise;
-        const { data } = await DB.getSession();
-        if (data.session) {
-            this.state.user = data.session.user;
-            await this.loadInitialData();
-        }
+        this.state.loading = true;
+        document.getElementById("app").innerHTML = this.loadingScreen();
+        window.addEventListener('hashchange', () => this.router());
+        try {
+            await Promise.race([DB.loadPromise, new Promise(r => setTimeout(r, 8000))]);
+        } catch(e) { console.warn('DB init timeout:', e); }
+        try {
+            const { data } = await DB.getSession();
+            if (data && data.session) {
+                this.state.user = data.session.user;
+                await this.loadInitialData();
+            }
+        } catch(e) { console.warn('Session check failed:', e); }
         this.state.loading = false;
         this.router();
-        window.addEventListener('hashchange', () => this.router());
     },
 
     async loadInitialData() {
