@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/@supabase/supabase-js@2.44.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/supabase/2.44.4/supabase.js"></script>
 <script>
     window.tailwind = window.tailwind || {};
     window.tailwind.config = {
@@ -53,7 +53,6 @@ class SupabaseManager {
         this.client = null;
         this.isOffline = !navigator.onLine;
         
-        // Dynamic Variable Checking: Merges build environments or falls back safely
         const rawUrl = (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) || window.APP_CONFIG?.VITE_SUPABASE_URL;
         const rawKey = (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) || window.APP_CONFIG?.VITE_SUPABASE_ANON_KEY;
 
@@ -83,14 +82,12 @@ class SupabaseManager {
                 auth: { persistSession: true, autoRefreshToken: true } 
             });
             
-            // Check connectivity validation right out of the box
             const { error: pingError } = await this.client.auth.getSession();
             if (pingError) throw pingError;
 
             console.log('Supabase client successfully initialized and verified live cloud connection!');
             this.isLocalMode = false;
             
-            // Explicitly force hide banner on successful cloud handshakes
             const banner = document.getElementById('offline-banner');
             if (banner) banner.classList.add('hidden');
             
@@ -102,11 +99,12 @@ class SupabaseManager {
         }
     }
 
+    // FIX: Updated backup runtime loader to target Cloudflare's CDN mirror as well
     loadSupabaseScript() {
         return new Promise((resolve, reject) => {
             if (window.supabase) return resolve();
             const script = document.createElement('script');
-            script.src = 'https://unpkg.com/@supabase/supabase-js@2.44.4/dist/umd/supabase.min.js';
+            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/supabase/2.44.4/supabase.js';
             script.async = true;
             script.onload = resolve;
             script.onerror = () => reject(new Error('CDN script resource download failed'));
@@ -313,7 +311,6 @@ const App = {
     },
 
     sidebar() {
-        const isAdmin = this.state.user?.staff?.role === 'admin' || this.state.user?.role === 'admin';
         const navItems = [
             { route: '/dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
             { route: '/patients', label: 'Patients', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
