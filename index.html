@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https: wss:;">
+<meta http-equiv="X-Content-Type-Options" content="nosniff">
+<meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
 <title>Haskay Pharmacy - Offline First</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -44,22 +47,34 @@
 <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
 <script>
 window.APP_CONFIG = {
-    VITE_SUPABASE_URL: 'https://hqmskhywllcyievplmsm.supabase.co',
-    VITE_SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhxbXNraHl3bGxjeWlldnBsbXNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5MzAyMjAsImV4cCI6MjA5NjUwNjIyMH0.byhaYKQvp58oW9jnb1tDEO4lnU0sFLYZFRygR_XVbmM'
+    VITE_SUPABASE_URL: '',
+    VITE_SUPABASE_ANON_KEY: ''
 };
+
+async function loadConfig() {
+    try {
+        const res = await fetch('/api/config');
+        if (!res.ok) return false;
+        const data = await res.json();
+        if (data.hasConfig || (data.SUPABASE_URL && data.SUPABASE_ANON_KEY) || (data.VITE_SUPABASE_URL && data.VITE_SUPABASE_ANON_KEY)) {
+            window.APP_CONFIG.VITE_SUPABASE_URL = data.SUPABASE_URL || data.VITE_SUPABASE_URL || '';
+            window.APP_CONFIG.VITE_SUPABASE_ANON_KEY = data.SUPABASE_ANON_KEY || data.VITE_SUPABASE_ANON_KEY || '';
+            return true;
+        }
+    } catch (e) {
+        console.error('Config fetch failed:', e);
+    }
+    return false;
+}
 
 class SupabaseManager {
     constructor() {
         this.client = null;
         this.isOffline = !navigator.onLine;
         
-        const rawUrl = (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) || window.APP_CONFIG?.VITE_SUPABASE_URL;
-        const rawKey = (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) || window.APP_CONFIG?.VITE_SUPABASE_ANON_KEY;
-
-        this.url = rawUrl ? rawUrl.trim() : '';
-        this.key = rawKey ? rawKey.trim() : '';
-        
-        this.isLocalMode = !this.url || !this.key;
+        this.url = '';
+        this.key = '';
+        this.isLocalMode = true;
         this.syncQueue = JSON.parse(localStorage.getItem('haskay_sync_queue') || '[]');
         this.loadPromise = this.init(); 
         
@@ -68,6 +83,15 @@ class SupabaseManager {
     }
 
     async init() {
+        await loadConfig();
+
+        const rawUrl = (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) || window.APP_CONFIG?.VITE_SUPABASE_URL;
+        const rawKey = (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) || window.APP_CONFIG?.VITE_SUPABASE_ANON_KEY;
+
+        this.url = rawUrl ? rawUrl.trim() : '';
+        this.key = rawKey ? rawKey.trim() : '';
+        this.isLocalMode = !this.url || !this.key;
+
         if (this.isLocalMode) {
             this.showBanner('Local Mode: Supabase not configured. All data stored locally.');
             return;
